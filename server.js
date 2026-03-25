@@ -32,7 +32,7 @@ app.post("/data", async (req, res) => {
 app.get("/command", async (req, res) => {
   const cmd = await Command.findOne().sort({ createdAt: -1 });
 
-  res.send(cmd ? cmd.command : "");
+  res.send(cmd ? cmd.command : "none");
 });
 
 // 🎮 Send command
