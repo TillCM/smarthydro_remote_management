@@ -30,9 +30,15 @@ app.post("/data", async (req, res) => {
 
 // 📤 Get latest command
 app.get("/command", async (req, res) => {
-  const cmd = await Command.findOne().sort({ createdAt: -1 });
+  const cmd = await Command.findOne({ executed: false }).sort({ createdAt: -1 });
 
-  res.send(cmd ? cmd.command : "none");
+  if (cmd) {
+    cmd.executed = true;
+    await cmd.save();
+    return res.send(cmd.command);
+  }
+
+  res.send("none");
 });
 
 // 🎮 Send command
