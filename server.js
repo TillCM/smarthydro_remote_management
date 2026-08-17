@@ -12,12 +12,36 @@ app.use(cors());
 // 🔌 connect database
 connectDB();
 
+// Known Deployed Tents. This is intentionally a soft guard, not a hard
+// schema constraint - GET /locations always reflects whatever locationIds
+// actually exist in the Sensor collection, so a new tent still shows up in
+// the app automatically once it posts its first reading. This list exists
+// purely to reject obvious typos at write time (e.g. "durban_noth") before
+// they create a silent phantom "location" in the data. Add a new slug here
+// when a new tent is deployed, matching its ESP32's LOCATION_ID exactly.
+const KNOWN_LOCATIONS = ["durban_north", "namibia", "sweet_waters"];
+
+function isValidLocationId(locationId) {
+  return typeof locationId === "string" && KNOWN_LOCATIONS.includes(locationId.toLowerCase());
+}
+
 // ===== ROUTES =====
 
 // 📥 Receive sensor data
+// Body must now include locationId (see Sensor.js). Readings without one,
+// or with an unrecognised one, are rejected rather than silently stored -
+// this is deliberately stricter than before, since a mis-tagged reading is
+// worse than a dropped one (it would misattribute data to the wrong tent).
 app.post("/data", async (req, res) => {
   try {
     console.log("Incoming data:", req.body);
+
+    const { locationId } = req.body;
+    if (!isValidLocationId(locationId)) {
+      return res.status(400).json({
+        error: "locationId is Required and Must be one of: " + KNOWN_LOCATIONS.join(", ")
+      });
+    }
 
     const data = new Sensor(req.body);
     await data.save();
@@ -28,9 +52,23 @@ app.post("/data", async (req, res) => {
   }
 });
 
-// 📤 Get latest command
+// 📤 Get latest command for a specific tent
+// locationId is now a REQUIRED query param, not optional - this is the
+// fix for the cross-tent command bug. A poll
+// without a locationId is rejected rather than falling back to the old
+// "any tent's oldest command" behavior
 app.get("/command", async (req, res) => {
-  const cmd = await Command.findOne({ executed: false }).sort({ createdAt: -1 });
+  const { locationId } = req.query;
+  if (!isValidLocationId(locationId)) {
+    return res.status(400).json({
+      error: "locationId query param is Required and must be one of: " + KNOWN_LOCATIONS.join(", ")
+    });
+  }
+
+  const cmd = await Command.findOne({
+    locationId: locationId.toLowerCase(),
+    executed: false
+  }).sort({ createdAt: -1 });
 
   if (cmd) {
     cmd.executed = true;
@@ -41,22 +79,62 @@ app.get("/command", async (req, res) => {
   res.send("none");
 });
 
-// 🎮 Send command
+// 🎮 Send command to a specific tent
+// Body must now include both command and locationId - the caller (mobile
+// app, or a manual curl) must say which tent this is for.
 app.post("/command", async (req, res) => {
-  const { command } = req.body;
+  const { command, locationId } = req.body;
 
-  console.log("New command:", command);
+  if (!isValidLocationId(locationId)) {
+    return res.status(400).json({
+      error: "locationId is Required and Must be one of: " + KNOWN_LOCATIONS.join(", ")
+    });
+  }
 
-  const cmd = new Command({ command });
+  console.log("New command:", command, "for", locationId);
+
+  const cmd = new Command({ command, locationId: locationId.toLowerCase() });
   await cmd.save();
 
   res.json({ status: "command stored" });
 });
 
-// 📊 Optional: view recent data
+// 📊 View recent data, optionally scoped to one tent
+// locationId is OPTIONAL here (unlike /command above) - omitting it
+// preserves the original "last 10 readings" behavior, just now potentially
+// spanning multiple tents if unfiltered. The mobile app should always pass
+// locationId once a location is selected; this stays optional mainly so
+// existing manual/debugging calls to this endpoint don't break.
 app.get("/data", async (req, res) => {
-  const data = await Sensor.find().sort({ timestamp: -1 }).limit(10);
+  const { locationId } = req.query;
+
+  const filter = {};
+  if (locationId) {
+    if (!isValidLocationId(locationId)) {
+      return res.status(400).json({
+        error: "locationId must be one of: " + KNOWN_LOCATIONS.join(", ")
+      });
+    }
+    filter.locationId = locationId.toLowerCase();
+  }
+
+  const data = await Sensor.find(filter).sort({ timestamp: -1 }).limit(10);
   res.json(data);
+});
+
+// 📍 List distinct locations currently reporting data
+// Drives the location selector in the mobile app. Deliberately reads from
+// the actual data (distinct locationIds already in the Sensor collection)
+// rather than returning the hardcoded KNOWN_LOCATIONS list above - a newly
+// deployed tent shows up here automatically the moment it posts its first
+// reading, with no backend redeploy needed.
+app.get("/locations", async (req, res) => {
+  try {
+    const locations = await Sensor.distinct("locationId");
+    res.json({ locations });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
