@@ -131,7 +131,7 @@ app.get("/data", async (req, res) => {
 app.get("/locations", async (req, res) => {
   try {
     const locations = await Sensor.distinct("locationId");
-    res.json({ locations });
+    res.json({ locations: locations.filter(Boolean) });  // Filter out falsy values (null, empty strings) from legacy or unvalidated data
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
