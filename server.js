@@ -4,7 +4,7 @@ const cors = require("cors");
 const connectDB = require("./db/connection");
 const Sensor = require("./models/Sensor");
 const Command = require("./models/Command");
-
+ const Photo = require("./models/Photo");
 const app = express();
 app.use(express.json());
 app.use(cors());
@@ -136,6 +136,97 @@ app.get("/locations", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+//App calls this to request a fresh photo from the tent's camera
+app.post("/photo/request", async (req, res) => {
+  const { locationId } = req.body;
+  if (!isValidLocationId(locationId)) {
+    return res.status(400).json({
+      error: "locationId is Required and Must be one of: " + KNOWN_LOCATIONS.join(", ")
+    });
+  }
+ 
+  await Photo.findOneAndUpdate(
+    { locationId: locationId.toLowerCase() },
+    { pending: true },
+    { upsert: true }
+  );
+ 
+  res.json({ status: "requested" });
+});
+ 
+//Camera polls this to check whether a photo has been requested
+app.get("/photo/pending", async (req, res) => {
+  const { locationId } = req.query;
+  if (!isValidLocationId(locationId)) {
+    return res.status(400).json({
+      error: "locationId query param is Required and must be one of: " + KNOWN_LOCATIONS.join(", ")
+    });
+  }
+ 
+  const photo = await Photo.findOne({ locationId: locationId.toLowerCase() });
+  res.json({ pending: photo ? photo.pending === true : false });
+});
+ 
+//Camera uploads the captured JPEG here (raw bytes)
+app.post("/photo", express.raw({ type: "image/jpeg", limit: "5mb" }), async (req, res) => {
+  const { locationId } = req.query;
+  if (!isValidLocationId(locationId)) {
+    return res.status(400).json({
+      error: "locationId query param is Required and must be one of: " + KNOWN_LOCATIONS.join(", ")
+    });
+  }
+  if (!req.body || !req.body.length) {
+    return res.status(400).json({ error: "empty request body - expected raw JPEG bytes" });
+  }
+ 
+  const capturedAt = new Date();
+  await Photo.findOneAndUpdate(
+    { locationId: locationId.toLowerCase() },
+    { data: req.body, contentType: "image/jpeg", pending: false, capturedAt },
+    { upsert: true }
+  );
+ 
+  res.json({ status: "ok", capturedAt: capturedAt.toISOString() });
+});
+ 
+//App calls this to check for/fetch the latest photo's metadata
+app.get("/photo", async (req, res) => {
+  const { locationId } = req.query;
+  if (!isValidLocationId(locationId)) {
+    return res.status(400).json({
+      error: "locationId query param is Required and must be one of: " + KNOWN_LOCATIONS.join(", ")
+    });
+  }
+ 
+  const photo = await Photo.findOne({ locationId: locationId.toLowerCase() });
+  if (!photo || !photo.capturedAt) {
+    return res.json({ url: null, capturedAt: null });
+  }
+ 
+  // The &v= parameter acts as a cache-buster. Because the base /photo/file URL remains constant, this ensures Coil loads the latest image rather than a cached copy.
+  res.json({
+    url: `https://${req.get("host")}/photo/file?locationId=${locationId.toLowerCase()}&v=${photo.capturedAt.getTime()}`,
+    capturedAt: photo.capturedAt
+  });
+});
+ 
+//Serves the actual JPEG bytes - the URL GET /photo hands back
+app.get("/photo/file", async (req, res) => {
+  const { locationId } = req.query;
+  if (!isValidLocationId(locationId)) {
+    return res.status(400).send("invalid locationId");
+  }
+ 
+  const photo = await Photo.findOne({ locationId: locationId.toLowerCase() });
+  if (!photo || !photo.data) {
+    return res.status(404).send("no photo yet");
+  }
+ 
+  res.set("Content-Type", photo.contentType || "image/jpeg");
+  res.send(photo.data);
+});
+ 
 
 const PORT = process.env.PORT || 3000;
 
